@@ -2,4 +2,4 @@ user = <MARIADB_USERNAME>
 password = <MARIADB_PASSWORD>
 hosts = 127.0.0.1
 dbname = <MARIADB_DATABASE>
-query = SELECT goto FROM alias WHERE address='%s' AND active=1 LIMIT 1
+query = SELECT 'OK' FROM alias WHERE address='%s' AND active=1 LIMIT 1
