@@ -1,0 +1,95 @@
+# -------------------------------------------------
+# Postfix compatibility level specification
+# -------------------------------------------------
+compatibility_level = 3.6
+
+# -------------------------------------------------
+# Basic SMTP settings
+# -------------------------------------------------
+myhostname = mail.example.com
+mydomain = example.com
+myorigin = $mydomain
+
+# -------------------------------------------------
+# Network interfaces and protocols
+# -------------------------------------------------
+inet_interfaces = all
+inet_protocols = ipv4,ipv6
+
+# -------------------------------------------------
+# SMTP HELO name
+# -------------------------------------------------
+smtp_helo_name = mail.example.com
+
+# -------------------------------------------------
+# Disable local email delivery
+# -------------------------------------------------
+mydestination =
+
+# -------------------------------------------------
+# Virtual aliases
+# -------------------------------------------------
+virtual_alias_maps = mysql:/etc/postfix/mysql-virtual-aliases.cf
+
+# -------------------------------------------------
+# General Security Settings
+# -------------------------------------------------
+disable_vrfy_command = yes 
+show_user_unknown_table_name = no
+smtpd_banner = $myhostname ESMTP 
+smtpd_client_connection_count_limit = 15 
+smtpd_client_connection_rate_limit = 60 
+smtpd_client_message_rate_limit = 60
+smtpd_client_recipient_rate_limit = 120
+smtpd_delay_reject = yes 
+smtpd_helo_required = yes
+smtpd_sasl_auth_enable = no
+unknown_local_recipient_reject_code = 550 
+
+# -------------------------------------------------
+# Restrictions Settings (Security)
+# -------------------------------------------------
+smtpd_relay_restrictions =
+    permit_mynetworks
+
+smtpd_recipient_restrictions =
+    reject_non_fqdn_recipient,
+    check_recipient_access mysql:/etc/postfix/mysql-rcpt-allow.cf,
+    reject,    
+
+smtpd_sender_restrictions =
+    permit_mynetworks,
+    check_sender_access regexp:/etc/postfix/block_srs_inbound.regexp,
+    check_sender_access mysql:/etc/postfix/mysql-block-local-senders.cf,
+    permit
+
+smtpd_helo_restrictions =
+    permit_mynetworks,
+    reject_invalid_helo_hostname
+
+# -------------------------------------------------
+# TLS Settings
+# -------------------------------------------------
+smtpd_tls_security_level = may
+smtp_tls_security_level = may
+
+smtpd_tls_cert_file = /etc/letsencrypt/live/mail.example.com/fullchain.pem
+smtpd_tls_key_file  = /etc/letsencrypt/live/mail.example.com/privkey.pem
+
+smtpd_tls_received_header = no
+
+# -------------------------------------------------
+# PostSRSd Settings | Sender Rewriting Scheme
+# -------------------------------------------------
+sender_canonical_maps = tcp:localhost:10001
+sender_canonical_classes = envelope_sender
+
+recipient_canonical_maps = tcp:localhost:10002
+recipient_canonical_classes = envelope_recipient
+
+# -------------------------------------------------
+# OpenDKIM Settings | DKIM Signing and Verification
+# -------------------------------------------------
+smtpd_milters = inet:127.0.0.1:8891
+non_smtpd_milters = $smtpd_milters
+milter_default_action = tempfail
