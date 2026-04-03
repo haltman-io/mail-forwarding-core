@@ -1,157 +1,182 @@
 # mail-forwarding-core
 
-> **A simple, complete, abuse-aware, open-source mail forwarding stack**
+> **A simple, complete, abuse-aware, open-source mail forwarding stack.**
 
-mail-forwarding-core (or simply **core**) is the reference implementation used by **Haltman.io** to provide a free, public, production-grade mail forwarding service.
+mail-forwarding-core (or simply **core**) is the reference implementation used
+by [Haltman.io](https://haltman.io/) to provide a free, public,
+production-grade mail forwarding service.
 
-It is designed to be:
-
-* Fully open-source
-* Stateless (no mailbox storage)
-* Abuse-aware by design
-* Deterministic and auditable
-* Scalable by composition, not complexity
-
-There is **no open-core**, **no artificial limitation**, and **no telemetry**.
-
-A public instance is available at:
-
-👉 [https://forward.haltman.io/](https://forward.haltman.io/)
-
-This document describes **how to install, configure, and validate the full stack** from scratch.
+A public instance is available at
+[https://forward.haltman.io](https://forward.haltman.io).
 
 ---
 
-## Architecture Overview
+## Design Principles
 
-mail-forwarding-core is composed of five main building blocks:
+* **Fully open-source** — no open-core, no artificial limitations, no telemetry
+* **Stateless** — no mailbox storage, no message content logging
+* **Abuse-aware** — anti-spoofing, sender ACL, rate limiting, SRS rejection
+* **Deterministic** — configuration-driven, auditable, reproducible
+* **Scalable by composition** — each component is independent and replaceable
 
-| Component | Role                               |
-| --------- | ---------------------------------- |
-| Postfix   | SMTP engine and policy enforcement |
-| PostSRSd  | Sender Rewriting Scheme (SRS)      |
-| MariaDB   | Alias lookup backend               |
-| OpenDKIM  | Optional DKIM signing              |
-| DNS       | Authentication and routing         |
+---
 
-### High-level flow
+## Architecture
+
+mail-forwarding-core is composed of six building blocks:
+
+| Component | Role |
+|---|---|
+| **Postfix** | SMTP engine, policy enforcement, forwarding |
+| **Dovecot** | SASL authentication backend for submission |
+| **PostSRSd** | Sender Rewriting Scheme (SRS) |
+| **MariaDB** | Alias lookups, domain registry, sender ACL, user accounts |
+| **OpenDKIM** | DKIM signing for outbound mail (optional) |
+| **DNS** | MX routing, SPF, DMARC, DKIM records |
+
+### Mail Flow
 
 ```
-Inbound Mail
-   ↓
-Postfix (smtpd)
-   ↓  (alias lookup)
-MariaDB
-   ↓
-PostSRSd (SRS rewrite)
-   ↓
-Postfix (smtp)
-   ↓
-External Destination
+Inbound Mail (port 25)
+   |
+   v
+Postfix smtpd
+   |  recipient allowlist check (alias_handle, alias)
+   |  sender anti-spoofing check (domain)
+   |  SRS inbound rejection (block_srs_inbound.regexp)
+   v
+MariaDB  -->  alias_handle lookup  -->  alias lookup  -->  goto destination
+   |
+   v
+PostSRSd (envelope sender rewrite)
+   |
+   v
+Postfix smtp  -->  External Destination
+```
+
+```
+Authenticated Submission (port 587, localhost)
+   |
+   v
+Postfix submission
+   |  TLS required
+   |  Dovecot SASL auth (TCP 127.0.0.1:12345)
+   |  Sender login map + ACL check (smtp_sender_acl)
+   v
+OpenDKIM signing (milter)
+   |
+   v
+Postfix smtp  -->  External Destination
 ```
 
 No messages are stored. No queues are inspected. No content is logged.
 
 ---
 
-## Installation Order (Important)
+## Repository Structure
 
-The order below is **mandatory**:
+```
+mail-forwarding-core/
+  __db/                 # Current database schema (one .sql file per table)
+  dns/                  # DNS record reference (MX, SPF, DMARC, DKIM)
+  dovecot/              # Dovecot configuration (SASL + SQL auth)
+  mariadb/              # MariaDB schema documentation
+  opendkim/             # OpenDKIM configuration (KeyTable, SigningTable)
+  postfix/              # Postfix configuration (main.cf, master.cf, MySQL maps)
+  postsrsd/             # PostSRSd configuration
+```
 
-1. MariaDB (schema + user)
-2. DNS records (MX / SPF / DMARC)
-3. PostSRSd
-4. Postfix
-5. OpenDKIM (optional, last)
-
-Installing components out of order will cause misleading failures.
+Each directory contains its own `README.md` with detailed documentation.
 
 ---
 
-## 1. MariaDB (Lookup Backend)
+## Database Schema
 
-MariaDB is used **only** as a lookup backend. Postfix never writes to it.
+The database contains **15 tables** organized into functional groups:
 
-### Install
+| Group | Tables | Purpose |
+|---|---|---|
+| MTA Core | `alias`, `alias_handle`, `domain`, `smtp_sender_acl` | Postfix lookups (4 tables, 8 MySQL maps) |
+| SMTP Auth | `smtp_users` | Dovecot SASL credential store |
+| API Layer | `api_tokens`, `api_token_requests`, `api_logs`, `api_bans` | Token lifecycle, audit, abuse prevention |
+| User Management | `users`, `auth_sessions`, `email_verification_tokens`, `password_reset_tokens` | Accounts and session tracking |
+| Email Workflow | `email_confirmations` | Subscription and confirmation flows |
+| DNS Verification | `dns_requests` | Domain ownership verification |
+
+Individual table definitions are in `__db/`. Full documentation is in `mariadb/README.md`.
+
+---
+
+## Installation
+
+### Prerequisites
+
+* Debian 13 (Trixie) or compatible
+* Root or sudo access
+* A public IP with port 25 open
+* DNS control for each domain to be forwarded
+
+### Installation Order
+
+The order below is **mandatory** — installing out of order will cause
+misleading failures:
+
+1. **MariaDB** — schema and database user
+2. **DNS** — MX, SPF, DMARC records
+3. **PostSRSd** — SRS daemon
+4. **Dovecot** — SASL authentication backend
+5. **Postfix** — MTA and policy engine
+6. **OpenDKIM** — DKIM signing (optional, last)
+
+---
+
+### 1. MariaDB
+
+MariaDB is the lookup backend. Postfix never writes to it.
 
 ```bash
 sudo apt install mariadb-server
 ```
 
-### Create database and user
-
 ```sql
-CREATE DATABASE maildb;
+CREATE DATABASE maildb CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
-CREATE USER 'maildb'@'localhost' IDENTIFIED BY 'strong-password';
-GRANT SELECT, INSERT ON maildb.* TO 'maildb'@'localhost';
+CREATE USER 'mailuser'@'localhost' IDENTIFIED BY 'strong-password';
+GRANT SELECT, INSERT, UPDATE, DELETE ON maildb.* TO 'mailuser'@'localhost';
 FLUSH PRIVILEGES;
 ```
 
-### Required tables
+Create the schema using the `.sql` files in `__db/`, or see `mariadb/README.md`
+for the full table definitions.
 
-#### `alias`
-
-```sql
-CREATE TABLE `alias` (
-  `id` int(11) NOT NULL AUTO_INCREMENT,
-  `address` varchar(320) NOT NULL,
-  `goto` text NOT NULL,
-  `active` tinyint(1) DEFAULT 1,
-  `created` timestamp NULL DEFAULT current_timestamp(),
-  `modified` timestamp NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uq_alias_address` (`address`)
-) ENGINE=InnoDB AUTO_INCREMENT=370 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci;
-```
-
-MariaDB setup is now complete.
+> Postfix requires only `SELECT`. The broader grants are for the API and
+> administrative tooling.
 
 ---
 
-## 2. DNS Configuration
+### 2. DNS
 
-Each forwarded domain **must** define DNS records correctly.
-
-### Required records
-
-#### MX
+Each forwarded domain requires MX, SPF, and DMARC records at minimum.
 
 ```dns
-example.org. MX 10 mail.example.net.
+example.org.         MX   10 mail.example-mta.net.
+example.org.         TXT  "v=spf1 mx -all"
+_dmarc.example.org.  TXT  "v=DMARC1; p=none"
 ```
 
-#### SPF
-
-```dns
-example.org. TXT "v=spf1 mx -all"
-```
-
-#### DMARC
-
-```dns
-_dmarc.example.org. TXT "v=DMARC1; p=none"
-```
-
-### Optional (recommended): DKIM
-
-If OpenDKIM is enabled later, a DKIM record will be required.
+See `dns/README.md` for detailed guidance and DKIM record setup.
 
 ---
 
-## 3. PostSRSd (Mandatory)
+### 3. PostSRSd
 
 Mail forwarding **requires SRS** to preserve SPF alignment.
-
-### Install
 
 ```bash
 sudo apt install postsrsd
 ```
 
-### Configuration
-
-Edit `/etc/default/postsrsd`:
+Configuration file: `/etc/default/postsrsd`
 
 ```ini
 SRS_DOMAIN=example.org
@@ -162,172 +187,172 @@ SRS_LISTEN_ADDR=127.0.0.1
 RUN_AS=postsrsd
 ```
 
-### Generate secret
+Generate the secret and start:
 
 ```bash
 openssl rand -hex 32 | sudo tee /etc/postsrsd.secret
 sudo chmod 600 /etc/postsrsd.secret
+sudo systemctl enable --now postsrsd
 ```
 
-### Start service
-
-```bash
-sudo systemctl enable postsrsd
-sudo systemctl restart postsrsd
-```
-
-Validate:
-
-```bash
-ss -ltnp | grep 1000
-```
+See `postsrsd/` for the reference configuration file.
 
 ---
 
-## 4. Postfix (Core Engine)
+### 4. Dovecot
 
-Postfix acts strictly as a forwarding MTA.
+Dovecot provides SASL authentication for Postfix submission.
 
-### Install
+```bash
+sudo apt install dovecot-core dovecot-imapd dovecot-mysql
+```
+
+Key configuration points:
+
+* Listens on `127.0.0.1` only
+* SQL authentication against `smtp_users` table via MariaDB
+* TCP auth listener on port `12345` for Postfix SASL
+* Unix socket at `/var/spool/postfix/private/auth` also available
+
+See `dovecot/README.md` for full configuration files and setup instructions.
+
+---
+
+### 5. Postfix
+
+Postfix acts strictly as a forwarding MTA with authenticated submission.
 
 ```bash
 sudo apt install postfix postfix-mysql
 ```
 
-Choose **Internet Site**, but delivery will be disabled.
+Key configuration files:
 
-### Key principles
+| Server path | Reference file |
+|---|---|
+| `/etc/postfix/main.cf` | `postfix/main.cf` |
+| `/etc/postfix/master.cf` | `postfix/master.cf` |
+| `/etc/postfix/mysql-virtual-handles.cf` | `postfix/mysql-virtual-handles.cf` |
+| `/etc/postfix/mysql-virtual-aliases.cf` | `postfix/mysql-virtual-aliases.cf` |
+| `/etc/postfix/mysql-allowlist-handles.cf` | `postfix/mysql-allowlist-handles.cf` |
+| `/etc/postfix/mysql-allowlist-aliases.cf` | `postfix/mysql-allowlist-aliases.cf` |
+| `/etc/postfix/mysql-block-local-senders.cf` | `postfix/mysql-block-local-senders.cf` |
+| `/etc/postfix/mysql-virtual-domains.cf` | `postfix/mysql-virtual-domains.cf` |
+| `/etc/postfix/mysql-allowed-senders.cf` | `postfix/mysql-allowed-senders.cf` |
+| `/etc/postfix/mysql-sender-login-maps.cf` | `postfix/mysql-sender-login-maps.cf` |
+| `/etc/postfix/block_srs_inbound.regexp` | `postfix/block_srs_inbound.regexp` |
 
-* No local delivery
-* No open relay
-* MySQL-backed aliases
-* Sender spoofing protection
-* Mandatory SRS integration
-
-### Files
-
-| Path in server | Example file |
-|:-|:-|
-| /etc/postfix/main.cf | [postfix/main.cf](./postfix/main.cf) |
-| /etc/postfix/master.cf | [postfix/master.cf](./postfix/master.cf) |
-| /etc/postfix/mysql-virtual-aliases.cf | [postfix/mysql-virtual-aliases.cf](./postfix/mysql-virtual-aliases.cf) |
-| /etc/postfix/mysql-rcpt-allow.cf | [postfix/mysql-rcpt-allow.cf](./postfix/mysql-rcpt-allow.cf) |
-| /etc/postfix/mysql-block-local-senders.cf | [postfix/mysql-block-local-senders.cf](./postfix/mysql-block-local-senders.cf) |
-| /etc/postfix/block_srs_inbound.regexp | [postfix/block_srs_inbound.regexp](./postfix/block_srs_inbound.regexp) |
-
-Inbound SRS addresses are explicitly rejected using `block_srs_inbound.regexp`:
-
-### Restart
-
-```bash
-sudo systemctl restart postfix
-```
+See `postfix/README.md` for detailed documentation of each file and the
+policy architecture.
 
 ---
 
-## 5. OpenDKIM (Optional, Recommended)
+### 6. OpenDKIM (Optional)
 
 OpenDKIM signs outbound mail to improve deliverability.
-
-### Install
 
 ```bash
 sudo apt install opendkim opendkim-tools
 ```
 
-### Socket
+OpenDKIM listens on `inet:127.0.0.1:8891` and integrates with Postfix via
+milter. Configuration is table-driven (`KeyTable`, `SigningTable`,
+`TrustedHosts`).
 
-OpenDKIM listens on:
+If OpenDKIM is not installed, remove the milter directives from `main.cf`.
 
-```
-inet:127.0.0.1:8891
-```
+For multi-domain environments,
+[mail-forwarding-dkim-sync](https://github.com/haltman-io/mail-forwarding-dkim-sync)
+is recommended to keep DKIM tables synchronized with the database.
 
-Postfix connects via milter.
-
-### Tables
-
-* `KeyTable`
-* `SigningTable`
-* `TrustedHosts`
-
-Private keys are **deployment-specific** and must never be committed.
-
-If OpenDKIM is not installed, simply remove milter directives from Postfix.
+See `opendkim/README.md` for full configuration reference.
 
 ---
 
 ## Validation Checklist
 
-* [ ] MX resolves to Postfix host
-* [ ] SPF passes on forwarded mail
-* [ ] SRS rewrite visible in headers
-* [ ] No local delivery occurs
-* [ ] External spoofing is rejected
-* [ ] DKIM (if enabled) signs correctly
+After installation, verify:
+
+- [ ] MX resolves to the Postfix host
+- [ ] PostSRSd is listening on ports 10001 and 10002
+- [ ] Dovecot auth listener is active on port 12345
+- [ ] Postfix accepts mail on port 25
+- [ ] Submission listener is active on port 587 (localhost)
+- [ ] Alias resolution works (handle-based and address-based)
+- [ ] Recipients not in the allowlist are rejected
+- [ ] External senders forging local domains are rejected
+- [ ] SRS rewrite is visible in forwarded message headers
+- [ ] Authenticated submission works via `swaks` or equivalent
+- [ ] Sender ACL rejects unauthorized MAIL FROM on submission
+- [ ] DKIM signatures are present (if OpenDKIM is enabled)
+- [ ] SPF passes on forwarded mail
 
 ---
 
 ## FAQ
 
-### Is this an open relay?
+**Is this an open relay?**
+No. Recipients are explicitly allowlisted via MySQL; anything else is rejected.
+Submission requires SASL authentication and sender ACL verification.
 
-No. Relay and recipient restrictions are explicit.
-
-### Are mails logged?
-
+**Are messages logged?**
 No message content is logged. Only minimal MTA operational logs exist.
 
-### Is PostSRSd optional?
+**Is PostSRSd optional?**
+No. Forwarding without SRS breaks SPF alignment.
 
-No. Forwarding without SRS breaks SPF.
+**Why reject inbound SRS addresses?**
+To prevent external SRS forgery and abuse. SRS is an internal forwarding
+mechanism only.
 
-### Why reject inbound SRS addresses?
+**Can I use multiple domains?**
+Yes. Domains and aliases are unlimited. Add entries to the `domain` and `alias`
+tables.
 
-To prevent external SRS forgery and abuse.
+**Is OpenDKIM mandatory?**
+No, but strongly recommended for production deployments.
 
-### Can I use multiple domains?
+**Does this store mailboxes?**
+No. This is forwarding only. No messages are stored.
 
-Yes. Domains and aliases are unlimited.
-
-### Is OpenDKIM mandatory?
-
-No, but strongly recommended for production.
-
-### Does this store mailboxes?
-
-No. This is forwarding only.
+**Is Dovecot required?**
+Only if you need authenticated submission (port 587). If the server is
+forwarding-only with no outbound relay, Dovecot can be omitted and the
+submission service removed from `master.cf`.
 
 ---
 
-## Security & Disclosure
+## Security and Disclosure
 
 If you find a vulnerability or misconfiguration:
 
-📧 [security@haltman.io](mailto:security@haltman.io)
+[security@haltman.io](mailto:security@haltman.io)
 
 We respond as fast as possible.
 
 ---
 
-## Community & Support
+## Community
 
-Join the Haltman.io Telegram group for:
+Join the Haltman.io Telegram group for questions, networking, design
+discussions, and operational feedback:
 
-* Questions
-* Networking
-* Design discussions
-* Operational feedback
-
-👉 [https://t.me/haltman_group](https://t.me/haltman_group)
+[https://t.me/haltman_group](https://t.me/haltman_group)
 
 ---
 
-## References
+## License
 
-* [https://haltman.io/](https://haltman.io/)
-* [https://haltman.io/about](https://haltman.io/about)
-* [https://forward.haltman.io](https://forward.haltman.io)
+This project is released into the **public domain** under the
+[Unlicense](./LICENSE).
+
+---
+
+## Links
+
+* [Haltman.io](https://haltman.io/)
+* [About Haltman.io](https://haltman.io/about)
+* [Public forwarding instance](https://forward.haltman.io)
 
 ---
 

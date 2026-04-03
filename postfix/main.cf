@@ -14,7 +14,7 @@ myorigin = $mydomain
 # Network interfaces and protocols
 # -------------------------------------------------
 inet_interfaces = all
-inet_protocols = ipv4,ipv6
+inet_protocols = ipv4
 
 # -------------------------------------------------
 # SMTP HELO name
@@ -29,7 +29,9 @@ mydestination =
 # -------------------------------------------------
 # Virtual aliases
 # -------------------------------------------------
-virtual_alias_maps = mysql:/etc/postfix/mysql-virtual-aliases.cf
+virtual_alias_maps = 
+    mysql:/etc/postfix/mysql-virtual-handles.cf,
+    mysql:/etc/postfix/mysql-virtual-aliases.cf
 
 # -------------------------------------------------
 # General Security Settings
@@ -54,8 +56,9 @@ smtpd_relay_restrictions =
 
 smtpd_recipient_restrictions =
     reject_non_fqdn_recipient,
-    check_recipient_access mysql:/etc/postfix/mysql-rcpt-allow.cf,
-    reject,    
+    check_recipient_access mysql:/etc/postfix/mysql-allowlist-handles.cf
+    check_recipient_access mysql:/etc/postfix/mysql-allowlist-aliases.cf,
+    reject
 
 smtpd_sender_restrictions =
     permit_mynetworks,
@@ -93,3 +96,11 @@ recipient_canonical_classes = envelope_recipient
 smtpd_milters = inet:127.0.0.1:8891
 non_smtpd_milters = $smtpd_milters
 milter_default_action = tempfail
+
+# --- Submission anti-spoof (deny-by-default MAIL FROM) ---
+smtpd_restriction_classes = submission_sender_policy
+
+submission_sender_policy =
+    check_sender_access mysql:/etc/postfix/mysql-allowed-senders.cf,
+    reject_sender_login_mismatch,
+    reject

@@ -1,10 +1,48 @@
+# -------------------------------------------------
+# SMTP listener services
+# -------------------------------------------------
 smtp      inet  n       -       y       -       -       smtpd
+127.0.0.1:submission inet n       -       n       -       -       smtpd
 
+# -------------------------------------------------
+# Submission service overrides
+# -------------------------------------------------
+  -o syslog_name=postfix/submission
+
+  # TLS enforcement and AUTH only after TLS
+  -o smtpd_tls_security_level=encrypt
+  -o smtpd_tls_auth_only=yes
+
+  # SASL via Dovecot (TCP)
+  -o smtpd_sasl_auth_enable=yes
+  -o smtpd_sasl_type=dovecot
+  -o smtpd_sasl_path=inet:127.0.0.1:12345
+
+  # Relay only for authenticated clients
+  -o smtpd_relay_restrictions=permit_sasl_authenticated,reject
+  -o smtpd_recipient_restrictions=permit_sasl_authenticated,reject
+  -o smtpd_client_restrictions=permit_sasl_authenticated,reject
+
+  # MAIL FROM anti-spoofing
+  -o smtpd_sender_login_maps=mysql:/etc/postfix/mysql-sender-login-maps.cf
+  -o smtpd_sender_restrictions=submission_sender_policy
+  #-o smtpd_sender_restrictions=permit_sasl_authenticated,reject
+  
+  # DKIM/milters for originating mail
+  -o milter_macro_daemon_name=ORIGINATING
+
+# -------------------------------------------------
+# Queue management services
+# -------------------------------------------------
 pickup    unix  n       -       y       60      1       pickup
 cleanup   unix  n       -       y       -       0       cleanup
 qmgr      unix  n       -       n       300     1       qmgr
 tlsmgr    unix  -       -       y       1000?   1       tlsmgr
 rewrite   unix  -       -       y       -       -       trivial-rewrite
+
+# -------------------------------------------------
+# Bounce and verification services
+# -------------------------------------------------
 bounce    unix  -       -       y       -       0       bounce
 defer     unix  -       -       y       -       0       bounce
 trace     unix  -       -       y       -       0       bounce
@@ -12,9 +50,17 @@ verify    unix  -       -       y       -       1       verify
 flush     unix  n       -       y       1000?   0       flush
 proxymap  unix  -       -       n       -       -       proxymap
 proxywrite unix -       -       n       -       1       proxymap
+
+# -------------------------------------------------
+# Outbound transport services
+# -------------------------------------------------
 smtp      unix  -       -       y       -       -       smtp
 relay     unix  -       -       y       -       -       smtp
         -o syslog_name=${multi_instance_name?{$multi_instance_name}:{postfix}}/$service_name
+
+# -------------------------------------------------
+# Local delivery and utility services
+# -------------------------------------------------
 showq     unix  n       -       y       -       -       showq
 error     unix  -       -       y       -       -       error
 retry     unix  -       -       y       -       -       error

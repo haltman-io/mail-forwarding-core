@@ -1,0 +1,6 @@
+# -------------------------------------------------
+# SQL password database
+# -------------------------------------------------
+passdb sql {
+  query = "SELECT username AS user, password FROM smtp_users WHERE username = '%{user}' AND active = 1"
+}

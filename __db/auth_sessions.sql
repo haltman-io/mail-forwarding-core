@@ -1,0 +1,21 @@
+CREATE TABLE `auth_sessions` (
+  `id` bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+  `user_id` bigint(20) unsigned NOT NULL,
+  `session_family_id` char(36) NOT NULL,
+  `refresh_token_hash` binary(32) NOT NULL,
+  `refresh_expires_at` datetime(6) NOT NULL,
+  `status` enum('active','rotated','revoked','reuse_detected') NOT NULL DEFAULT 'active',
+  `created_at` datetime(6) NOT NULL DEFAULT current_timestamp(6),
+  `revoked_at` datetime(6) DEFAULT NULL,
+  `replaced_by_session_id` bigint(20) unsigned DEFAULT NULL,
+  `last_used_at` datetime(6) DEFAULT NULL,
+  `request_ip` varbinary(16) DEFAULT NULL,
+  `user_agent` varchar(255) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_auth_sessions_refresh_token_hash` (`refresh_token_hash`),
+  KEY `ix_auth_sessions_family_status` (`session_family_id`,`status`,`refresh_expires_at`),
+  KEY `ix_auth_sessions_user_family` (`user_id`,`session_family_id`),
+  KEY `fk_auth_sessions_replaced_by` (`replaced_by_session_id`),
+  CONSTRAINT `fk_admin_auth_sessions_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT `fk_auth_sessions_replaced_by` FOREIGN KEY (`replaced_by_session_id`) REFERENCES `auth_sessions` (`id`) ON DELETE SET NULL
+) ENGINE=InnoDB AUTO_INCREMENT=327 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

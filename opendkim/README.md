@@ -148,6 +148,20 @@ For production usage, enabling DKIM is highly recommended.
 
 ---
 
+## Multi-Domain Key Synchronization
+
+For infrastructures serving **multiple domains**, using
+[mail-forwarding-dkim-sync](https://github.com/haltman-io/mail-forwarding-dkim-sync)
+is highly recommended.
+
+This tool keeps OpenDKIM `KeyTable` and `SigningTable` synchronized with the
+list of domains stored in the MariaDB database (`domain` table). It is designed
+for environments that manage many domains and need DKIM signing to stay aligned
+with the visible sender domain automatically, without manually editing OpenDKIM
+tables every time a new domain is added.
+
+---
+
 ## DNS Requirements (Out of Scope)
 
 For DKIM to function correctly, each selector must have a corresponding DNS

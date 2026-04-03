@@ -19,10 +19,11 @@ The configurations in this directory describe a Postfix setup with the following
 
 - Act strictly as a **mail forwarding / aliasing service**
 - **No local mailbox delivery**
-- Recipients and aliases managed via **MySQL**
+- Recipients and aliases managed via **MySQL** (address-based and handle-based)
 - Strong **anti-spoofing** and **anti-open-relay** posture
 - Explicit handling of **SRS (Sender Rewriting Scheme)**
 - Designed to integrate with **DKIM** and external policy services
+- **Authenticated submission** via Dovecot SASL with sender ACL enforcement
 
 This is **not** a beginner guide to Postfix.
 Basic familiarity with Postfix concepts is assumed.
@@ -38,42 +39,124 @@ Primary Postfix configuration.
 Key characteristics:
 
 - Explicitly disables local delivery via an empty `mydestination`
-- Virtual alias lookups backed by MySQL
+- Virtual alias lookups backed by MySQL (handle-based, then address-based)
 - Recipient allowlisting backed by MySQL (default reject)
-- HELO/EHLO hygiene
+- HELO/EHLO hygiene and rate limiting
 - Integration points for:
-  - SRS (TCP maps)
-  - DKIM (milter)
-
-TLS is enabled with example certificate paths (see below).
+  - SRS (TCP maps via PostSRSd)
+  - DKIM (milter via OpenDKIM)
+- Defines `submission_sender_policy` restriction class for authenticated submission
 
 ---
 
-#### How `main.cf` wires this together
+### `master.cf`
 
-##### No local delivery
+Service definitions used by Postfix.
+
+Defines two inbound listeners:
+
+- **`smtp` (port 25)** — standard inbound MTA, no authentication
+- **`submission` (port 587, localhost only)** — authenticated relay via Dovecot SASL
+
+The submission service overrides enforce:
+
+- TLS encryption required (`smtpd_tls_security_level=encrypt`)
+- SASL authentication required before relay
+- Dovecot SASL backend via TCP (`inet:127.0.0.1:12345`)
+- Sender login map enforcement (`mysql-sender-login-maps.cf`)
+- Anti-spoofing via `submission_sender_policy`
+- DKIM signing for originating mail (`milter_macro_daemon_name=ORIGINATING`)
+
+---
+
+### MySQL Map Files
+
+Postfix queries **4 database tables** through **8 MySQL map files**:
+
+#### Alias Resolution (virtual_alias_maps)
+
+| File | Table | Query | Purpose |
+|---|---|---|---|
+| `mysql-virtual-handles.cf` | `alias_handle` | `SELECT address WHERE handle='%u'` | Resolve handle (local-part) to address |
+| `mysql-virtual-aliases.cf` | `alias` | `SELECT goto WHERE address='%s'` | Resolve address to destination |
+
+Handles are checked first. If the local-part matches a handle, the resolved
+address is then looked up in the alias table for the final destination.
+
+#### Recipient Allowlisting (smtpd_recipient_restrictions)
+
+| File | Table | Query | Purpose |
+|---|---|---|---|
+| `mysql-allowlist-handles.cf` | `alias_handle` | `SELECT 'OK' WHERE handle='%u'` | Accept recipient if handle exists |
+| `mysql-allowlist-aliases.cf` | `alias` | `SELECT 'OK' WHERE address='%s'` | Accept recipient if alias exists |
+
+Any recipient not matching either allowlist is rejected.
+
+#### Sender Anti-Spoofing (smtpd_sender_restrictions)
+
+| File | Table | Query | Purpose |
+|---|---|---|---|
+| `mysql-block-local-senders.cf` | `domain` | `SELECT 'REJECT ...' WHERE name='%d'` | Reject external senders forging local domains |
+
+#### Domain Verification
+
+| File | Table | Query | Purpose |
+|---|---|---|---|
+| `mysql-virtual-domains.cf` | `domain` | `SELECT 1 WHERE name='%s'` | Verify domain is hosted locally |
+
+#### Authenticated Submission (submission_sender_policy + sender_login_maps)
+
+| File | Table | Query | Purpose |
+|---|---|---|---|
+| `mysql-allowed-senders.cf` | `smtp_sender_acl` | `SELECT 'OK' WHERE sender='%s'` | Verify sender address is permitted |
+| `mysql-sender-login-maps.cf` | `smtp_sender_acl` | `SELECT login WHERE sender='%s'` | Map sender to authenticated login |
+
+All queries filter by `active=1`.
+
+---
+
+### `block_srs_inbound.regexp`
+
+Rejects inbound messages with SRS-formatted senders:
+
+```
+/^SRS[01]=/    REJECT SRS sender not accepted inbound
+```
+
+This ensures:
+
+- SRS is only used internally for forwarding
+- External SRS traffic is not accepted blindly
+
+---
+
+## How `main.cf` Wires This Together
+
+### No local delivery
 
 ```ini
 mydestination =
 ```
 
-##### MySQL-backed aliasing + recipient allowlist
+### MySQL-backed aliasing (handle + address resolution)
 
 ```ini
-virtual_alias_maps = mysql:/etc/postfix/mysql-virtual-aliases.cf
-
-smtpd_recipient_restrictions =
-    reject_non_fqdn_recipient,
-    check_recipient_access mysql:/etc/postfix/mysql-rcpt-allow.cf,
-    reject,
+virtual_alias_maps =
+    mysql:/etc/postfix/mysql-virtual-handles.cf,
+    mysql:/etc/postfix/mysql-virtual-aliases.cf
 ```
 
-In this setup:
+### Recipient allowlisting (default reject)
 
-- `mysql-rcpt-allow.cf` controls which `RCPT TO` addresses are accepted (allowlist).
-- `mysql-virtual-aliases.cf` controls where accepted recipients are forwarded (`address` → `goto`).
+```ini
+smtpd_recipient_restrictions =
+    reject_non_fqdn_recipient,
+    check_recipient_access mysql:/etc/postfix/mysql-allowlist-handles.cf
+    check_recipient_access mysql:/etc/postfix/mysql-allowlist-aliases.cf,
+    reject
+```
 
-##### Anti-spoofing + inbound SRS rejection
+### Anti-spoofing + inbound SRS rejection
 
 ```ini
 smtpd_sender_restrictions =
@@ -83,20 +166,42 @@ smtpd_sender_restrictions =
     permit
 ```
 
-##### SRS integration (postsrsd or equivalent)
+### Submission sender policy (deny-by-default MAIL FROM)
+
+```ini
+smtpd_restriction_classes = submission_sender_policy
+
+submission_sender_policy =
+    check_sender_access mysql:/etc/postfix/mysql-allowed-senders.cf,
+    reject_sender_login_mismatch,
+    reject
+```
+
+This is applied to the submission service via `master.cf` overrides, along with:
+
+```ini
+smtpd_sender_login_maps = mysql:/etc/postfix/mysql-sender-login-maps.cf
+```
+
+### SRS integration (PostSRSd)
 
 ```ini
 sender_canonical_maps = tcp:localhost:10001
+sender_canonical_classes = envelope_sender
+
 recipient_canonical_maps = tcp:localhost:10002
+recipient_canonical_classes = envelope_recipient
 ```
 
-##### DKIM signing/verification (OpenDKIM or compatible milter)
+### DKIM signing/verification (OpenDKIM)
 
 ```ini
 smtpd_milters = inet:127.0.0.1:8891
+non_smtpd_milters = $smtpd_milters
+milter_default_action = tempfail
 ```
 
-##### TLS
+### TLS
 
 ```ini
 smtpd_tls_security_level = may
@@ -106,68 +211,8 @@ smtpd_tls_cert_file = /etc/letsencrypt/live/mail.example.com/fullchain.pem
 smtpd_tls_key_file  = /etc/letsencrypt/live/mail.example.com/privkey.pem
 ```
 
-If you don’t want Postfix terminating TLS on this host, remove/comment the TLS lines.
+If you don't want Postfix terminating TLS on this host, remove/comment the TLS lines.
 If you do enable TLS, ensure the certificate and key paths exist or Postfix may fail to start.
-
----
-
-### `master.cf`
-
-Service definitions used by Postfix.
-
-- Largely defaults
-- No unsafe overrides
-- No custom listeners exposed
-
-Provided for completeness and transparency.
-
----
-
-### `mysql-virtual-aliases.cf`
-
-Defines how Postfix resolves email aliases via MySQL.
-
-This file controls:
-
-- Address → destination mappings
-- Forwarding behavior
-
----
-
-### `mysql-rcpt-allow.cf`
-
-Defines how Postfix checks whether a recipient is accepted at SMTP time.
-
-This file controls:
-
-- Which `RCPT TO` addresses are accepted (allowlist)
-
-In `main.cf`, anything not allowlisted is rejected.
-
----
-
-### `mysql-block-local-senders.cf`
-
-Implements **dynamic sender spoofing protection**.
-
-Instead of returning data, this query intentionally returns a **static REJECT**
-when the sender domain matches an active local domain.
-
-This prevents external clients from forging `MAIL FROM` addresses belonging
-to hosted domains.
-
-This behavior is deliberate.
-
----
-
-### `block_srs_inbound.regexp`
-
-Rejects inbound messages with SRS-formatted senders.
-
-This ensures:
-
-- SRS is only used internally for forwarding
-- External SRS traffic is not accepted blindly
 
 ---
 
@@ -178,55 +223,38 @@ They are **not** included or deployed automatically.
 
 You **must** account for them if you reuse these files.
 
-### 1. SRS daemon (postsrsd or equivalent)
+### 1. SRS daemon (PostSRSd or equivalent)
 
-The following lines in `main.cf`:
+`main.cf` references:
 
-```ini
-sender_canonical_maps = tcp:localhost:10001
-recipient_canonical_maps = tcp:localhost:10002
-```
-
-Assume:
-
-* An SRS daemon listening on:
-
-  * `localhost:10001` (forward rewriting)
-  * `localhost:10002` (reverse rewriting)
+* `tcp:localhost:10001` (forward rewriting)
+* `tcp:localhost:10002` (reverse rewriting)
 
 If no daemon is running, Postfix will fail to process addresses correctly.
 
----
-
 ### 2. DKIM milter
 
-The following line in `main.cf`:
+`main.cf` references:
 
-```ini
-smtpd_milters = inet:127.0.0.1:8891
-```
+* OpenDKIM (or compatible milter) on `inet:127.0.0.1:8891`
+* `milter_default_action = tempfail` — mail is deferred if the milter is unreachable
 
-Assumes:
+### 3. Dovecot SASL
 
-* OpenDKIM (or compatible milter)
-* Listening locally on port `8891`
+`master.cf` submission service references:
 
-DKIM keys, selector management, and DNS records are **out of scope** for this directory.
+* Dovecot SASL backend on `inet:127.0.0.1:12345`
 
----
+If Dovecot is not running or not configured for SASL, authenticated submission will fail.
 
-### 3. MySQL / MariaDB schema
+### 4. MySQL / MariaDB schema
 
-The MySQL queries assume:
+The MySQL queries require the following tables:
 
-* A database schema containing at least:
-
-  * `alias`
-  * `domain`
-* Fields such as:
-
-  * `alias.address`, `alias.goto`, `alias.active`
-  * `domain.name`, `domain.active`
+* `alias` — fields: `address`, `goto`, `active`
+* `alias_handle` — fields: `handle`, `address`, `active`
+* `domain` — fields: `name`, `active`
+* `smtp_sender_acl` — fields: `login`, `sender`, `active`
 
 Schema creation and migrations are handled elsewhere in the project.
 
@@ -234,16 +262,19 @@ Schema creation and migrations are handled elsewhere in the project.
 
 ## Security Considerations
 
-* No credentials are embedded in these files.
-* All database credentials are placeholders.
-* No real IP addresses are exposed.
-* TLS is configured with example paths; replace with your real certificate locations.
+* No credentials are embedded in these files — all use `<MARIADB_USER>` / `<MARIADB_PASS>` placeholders
+* No real IP addresses or domains are exposed
+* TLS is configured with example paths; replace with your real certificate locations
+* VRFY is disabled to prevent address enumeration
+* Rate limiting is enforced per-client (connections, messages, recipients)
+* The submission listener binds to `127.0.0.1` only
+* `milter_default_action = tempfail` ensures mail is deferred (not silently accepted) if DKIM signing is unavailable
 
 ---
 
 ## FAQ
 
-### ❓ Are these files safe to publish publicly?
+### Are these files safe to publish publicly?
 
 Yes.
 
@@ -252,32 +283,32 @@ They document behavior and architecture only.
 
 ---
 
-### ❓ Can I deploy Postfix by copying these files as-is?
+### Can I deploy Postfix by copying these files as-is?
 
 No.
 
 These files are **reference configurations**, not an installer.
 You must adapt:
 
-* Domains
+* Domains and hostnames
 * Database credentials
 * TLS certificates
-* Auxiliary services (SRS, DKIM)
+* Auxiliary services (SRS, DKIM, Dovecot SASL)
 
 ---
 
-### ❓ Why is TLS configured with example paths?
+### Why is TLS configured with example paths?
 
 Because certificate provisioning is environment-specific, but most real deployments
 need TLS.
 
-The example uses Let’s Encrypt-style paths for `mail.example.com` to show what a
+The example uses Let's Encrypt-style paths for `mail.example.com` to show what a
 working setup looks like. Replace these paths with your real certificate locations
 or remove/comment the TLS lines if TLS termination is handled elsewhere.
 
 ---
 
-### ❓ Why does `mysql-block-local-senders.cf` return a static `REJECT`?
+### Why does `mysql-block-local-senders.cf` return a static `REJECT`?
 
 This is intentional.
 
@@ -286,7 +317,7 @@ If the sender domain exists and is active locally, Postfix rejects the sender to
 
 ---
 
-### ❓ Why reject inbound SRS addresses?
+### Why reject inbound SRS addresses?
 
 Because SRS is an **internal forwarding mechanism**.
 
@@ -294,16 +325,17 @@ Accepting external SRS blindly increases abuse surface and breaks trust assumpti
 
 ---
 
-### ❓ Is this an open relay?
+### Is this an open relay?
 
 No.
 
-Recipients are explicitly allowlisted via `mysql-rcpt-allow.cf`; anything else is rejected.
-That keeps the service from relaying to arbitrary destinations.
+Recipients are explicitly allowlisted via `mysql-allowlist-handles.cf` and
+`mysql-allowlist-aliases.cf`; anything else is rejected.
+Submission requires SASL authentication and sender ACL verification.
 
 ---
 
-### ❓ Where are SPF, DKIM, and DMARC configured?
+### Where are SPF, DKIM, and DMARC configured?
 
 Outside of this directory.
 
@@ -320,7 +352,7 @@ This directory exists to:
 * Document security posture
 * Enable reproducibility by experienced operators
 
-If you are looking for a “one-click mail server”, this is not it.
+If you are looking for a "one-click mail server", this is not it.
 
 If you are looking for a **transparent, abuse-aware mail forwarding architecture**,
 you are in the right place.

@@ -1,0 +1,21 @@
+CREATE TABLE `api_token_requests` (
+  `id` bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+  `email` varchar(254) NOT NULL,
+  `token_hash` binary(32) NOT NULL,
+  `status` enum('pending','confirmed','expired') NOT NULL DEFAULT 'pending',
+  `days` int(10) unsigned NOT NULL,
+  `created_at` datetime(6) NOT NULL DEFAULT current_timestamp(6),
+  `expires_at` datetime(6) NOT NULL,
+  `confirmed_at` datetime(6) DEFAULT NULL,
+  `request_ip` varbinary(16) DEFAULT NULL,
+  `user_agent` varchar(255) DEFAULT NULL,
+  `send_count` int(10) unsigned NOT NULL DEFAULT 1,
+  `last_sent_at` datetime(6) NOT NULL DEFAULT current_timestamp(6),
+  `attempts_confirm` int(10) unsigned NOT NULL DEFAULT 0,
+  `active_pending` tinyint(4) GENERATED ALWAYS AS (case when `status` = 'pending' then 1 else NULL end) VIRTUAL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_api_token_requests_token_hash` (`token_hash`),
+  UNIQUE KEY `uq_api_token_requests_email_active_pending` (`email`,`active_pending`),
+  KEY `idx_api_token_requests_email_status` (`email`,`status`),
+  KEY `idx_api_token_requests_expires_at` (`expires_at`)
+) ENGINE=InnoDB AUTO_INCREMENT=64 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

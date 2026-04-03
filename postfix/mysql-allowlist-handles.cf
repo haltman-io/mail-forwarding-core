@@ -2,4 +2,4 @@ user = <MARIADB_USER>
 password = <MARIADB_PASS>
 hosts = 127.0.0.1
 dbname = <MARIADB_DATABASE>
-query = SELECT 'REJECT forged local sender' FROM domain WHERE active=1 AND name='%d' LIMIT 1
+query = SELECT 'OK' FROM alias_handle WHERE handle='%u' AND active=1 LIMIT 1;
