@@ -1,0 +1,5 @@
+user = <MARIADB_USER>
+password = <MARIADB_PASS>
+hosts = 127.0.0.1
+dbname = <MARIADB_DATABASE>
+query = SELECT CONCAT('error:5.7.1 Domain banned. ', reason) FROM api_bans WHERE ban_type = 'domain' AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > NOW()) AND CONCAT('.', '%s') LIKE ban_pattern LIMIT 1;

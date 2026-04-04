@@ -104,3 +104,6 @@ submission_sender_policy =
     check_sender_access mysql:/etc/postfix/mysql-allowed-senders.cf,
     reject_sender_login_mismatch,
     reject
+
+# Breaking mail.tm and mail.gw abuse behavior by banning their MX hosts on UI and using transport_maps to force Postfix discard emails to already registered aliases destinations that resolves to banned domains
+transport_maps = mysql:/etc/postfix/mysql-banned-domains.cf
