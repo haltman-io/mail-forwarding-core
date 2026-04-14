@@ -136,7 +136,7 @@ Email, Telegram, Signal, Discord, Smoke signal. Select one:
 1. Send your question to **[security@haltman.io](mailto:security@haltman.io)**.
 2. Join at one of our public channels, check the list at https://haltman.io/join
 
-Before writing, check that follow this communication best practices examples. 
+Before writing, check that communication best practices examples. 
 
 
 ❌❌❌❌❌ Avoid empty messages:
@@ -144,7 +144,7 @@ Before writing, check that follow this communication best practices examples.
 hello can I talk to you?
 ```
 
-We hate that and more important things to do.
+We hate that and we have more important things to do.
 
 ---
 
