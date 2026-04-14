@@ -123,7 +123,7 @@ If
 * the disclosure was handled right,
 
 Then
-* your name goes into the our **Hall of Fame** page.
+* your name goes into our **Hall of Fame** page.
 * permanently.
 
 We take responsible disclosure seriously.
