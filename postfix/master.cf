@@ -31,15 +31,21 @@ smtp      inet  n       -       y       -       -       smtpd
   # DKIM/milters for originating mail
   -o milter_macro_daemon_name=ORIGINATING
   
-  # Isolate SMTP subsmission properly)
+  # SECURITY PATCH: Isolate authenticated submission from local alias/handle rewrites.
+  # If a user owns a wildcard handle such as admin@<all-local-domains>, Postfix must
+  # not expand outbound confirmation recipients through virtual_alias_maps during
+  # cleanup, or the handle owner can receive a confirmation code intended for some
+  # other admin@domain.tld recipient that merely shares the same local-part.
   -o cleanup_service_name=subcleanup 
+
 # -------------------------------------------------
 # Queue management services
 # -------------------------------------------------
 pickup    unix  n       -       y       60      1       pickup
 cleanup   unix  n       -       y       -       0       cleanup
 subcleanup unix  n       -       y       -       0       cleanup
-  -o virtual_alias_maps= # 
+  # SECURITY PATCH: Preserve the original recipient on submitted mail.
+  -o virtual_alias_maps=
   -o sender_canonical_maps=
   -o recipient_canonical_maps=
 qmgr      unix  n       -       n       300     1       qmgr

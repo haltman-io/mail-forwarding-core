@@ -21,6 +21,43 @@ A public instance is available at
 
 ---
 
+## Active Protections
+
+The stack is intentionally narrow and deny-by-default. The protections below are
+active in the reference configuration shipped in this repository:
+
+* **Recipient allowlisting** — inbound mail is accepted only for addresses that
+  exist in `alias_handle` or `alias`; everything else is rejected
+* **No local mailbox delivery** — `mydestination` is empty, so the server does
+  not silently become a mailbox host
+* **Authenticated submission only** — submission requires TLS plus Dovecot SASL
+* **Sender anti-spoofing on submission** — `sender_login_maps`,
+  `submission_sender_policy`, and `reject_sender_login_mismatch` enforce who may
+  send as which address
+* **Anti-spoofing for hosted domains** — external senders forging local domains
+  are rejected by the Postfix sender policy
+* **Submission cleanup isolation** — authenticated outbound mail uses a
+  dedicated `subcleanup` service with `virtual_alias_maps` cleared so local
+  alias/handle rewrites cannot capture confirmation emails or other submitted
+  mail addressed to external recipients that share the same local-part
+* **SRS boundary enforcement** — forwarded mail is rewritten via PostSRSd, and
+  inbound SRS-formatted senders are rejected instead of being trusted blindly
+* **Abuse controls** — connection, message, and recipient rate limits are
+  enabled; banned domains can be blocked through `api_bans` and Postfix
+  `transport_maps`
+* **Minimal data exposure** — no mailbox storage, no message content logging,
+  and plaintext tokens are never persisted in the database
+* **Fail-closed DKIM integration** — when OpenDKIM is enabled,
+  `milter_default_action = tempfail` prevents silent unsigned delivery if the
+  signing service is unavailable
+
+See [postfix/README.md](./postfix/README.md),
+[mariadb/README.md](./mariadb/README.md),
+and [SECURITY.md](./SECURITY.md)
+for the lower-level details behind each control.
+
+---
+
 ## Architecture
 
 mail-forwarding-core is composed of six building blocks:
@@ -62,6 +99,7 @@ Postfix submission
    |  TLS required
    |  Dovecot SASL auth (TCP 127.0.0.1:12345)
    |  Sender login map + ACL check (smtp_sender_acl)
+   |  dedicated subcleanup with no alias/handle rewrite
    v
 OpenDKIM signing (milter)
    |
@@ -284,6 +322,8 @@ After installation, verify:
 - [ ] SRS rewrite is visible in forwarded message headers
 - [ ] Authenticated submission works via `swaks` or equivalent
 - [ ] Sender ACL rejects unauthorized MAIL FROM on submission
+- [ ] Submission traffic does not pass through `virtual_alias_maps`
+- [ ] A local wildcard handle cannot intercept an outbound confirmation email
 - [ ] DKIM signatures are present (if OpenDKIM is enabled)
 - [ ] SPF passes on forwarded mail
 
@@ -328,7 +368,9 @@ If you find a vulnerability or misconfiguration:
 
 [security@haltman.io](mailto:security@haltman.io)
 
-We respond as fast as possible.
+Include reproduction steps, expected behavior, actual behavior, and impact.
+The full reporting policy, scope, and example report format are in
+[SECURITY.md](./SECURITY.md).
 
 ---
 
