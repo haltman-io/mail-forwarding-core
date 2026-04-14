@@ -117,7 +117,14 @@ If it does not, triage ends there.
 
 ## HALL OF FAME
 
-If the bug is real, the report is clean, and the disclosure was handled right, your handle goes into the **Haltman.IO Hall of Fame**. Permanently.
+If
+* the bug is real,
+* the report is clean, and
+* the disclosure was handled right,
+
+Then
+* your name goes into the our **Hall of Fame** page.
+* permanently.
 
 We take responsible disclosure seriously.
 
@@ -129,7 +136,7 @@ Email, Telegram, Signal, Discord, Smoke signal. Select one:
 1. Send your question to **[security@haltman.io](mailto:security@haltman.io)**.
 2. Join at one of our public channels, check the list at https://haltman.io/join
 
-### before sending us your message, please FOLLOW THIS COMMUNICATION BEST PRACTICES
+Before writing, check that follow this communication best practices examples. 
 
 
 ❌❌❌❌❌ Avoid empty messages:
