@@ -101,8 +101,9 @@ milter_default_action = tempfail
 smtpd_restriction_classes = submission_sender_policy
 
 submission_sender_policy =
-    check_sender_access mysql:/etc/postfix/mysql-allowed-senders.cf,
+    reject_non_fqdn_sender,
     reject_sender_login_mismatch,
+    permit_sasl_authenticated,
     reject
 
 # Breaking mail.tm and mail.gw abuse behavior by banning their MX hosts on UI and using transport_maps to force Postfix discard emails to already registered aliases destinations that resolves to banned domains
