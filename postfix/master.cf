@@ -2,7 +2,7 @@
 # SMTP listener services
 # -------------------------------------------------
 smtp      inet  n       -       y       -       -       smtpd
-127.0.0.1:submission inet n       -       n       -       -       smtpd
+submission inet n       -       n       -       -       smtpd
 
 # -------------------------------------------------
 # Submission service overrides
