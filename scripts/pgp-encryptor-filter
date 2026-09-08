@@ -1,0 +1,331 @@
+#!/usr/bin/env python3
+"""
+PGP/MIME Inbound Mail Encryption Content Filter for the Free Email Forwarding
+project built by The Hacker's Choice (www.thc.org) and Haltman.IO (haltman.io).
+
+* https://mail.thc.org/ - no logs. no accounts. no limits. -> you@segfault.net.
+
+Implements RFC 3156 (PGP/MIME) and RFC 7508 (Protected Headers)
+with hybrid sender rewriting and boundary enforcement for DKIM/DMARC alignment.
+"""
+
+import sys
+import os
+import re
+import smtplib
+import pymysql
+import email
+from email import policy
+from email.message import EmailMessage
+from email.mime.multipart import MIMEMultipart
+from email.mime.application import MIMEApplication
+from email.utils import parseaddr, formataddr, getaddresses
+import warnings
+
+# Suppress cryptography library deprecation warnings from pgpy
+try:
+    from cryptography.utils import CryptographyDeprecationWarning
+    warnings.filterwarnings("ignore", category=CryptographyDeprecationWarning)
+except Exception:
+    pass
+
+import pgpy
+
+# MariaDB Connection settings (load via env or defaults)
+DB_CONFIG = {
+    "host": os.getenv("DB_HOST", "127.0.0.1"),
+    "user": os.getenv("DB_USER", "mailuser"),
+    "password": os.getenv("DB_PASS", "mailpass"),
+    "database": os.getenv("DB_NAME", "maildb"),
+    "cursorclass": pymysql.cursors.DictCursor,
+}
+
+REINJECT_HOST = "127.0.0.1"
+REINJECT_PORT = 10025
+
+# Exit codes for Postfix (sysexits.h)
+EX_OK = 0
+EX_TEMPFAIL = 75
+EX_UNAVAILABLE = 69
+
+
+def build_hybrid_from(orig_from: str, alias_addr: str) -> str:
+    """
+    Constructs a safe hybrid From header: "Display Name (user@sender.com)" <alias@domain.tld>
+    Enforces strict character limits and CRLF stripping to prevent header injection / DoS.
+    """
+    # Sanitize control characters and CRLF before parsing
+    clean_orig_from = re.sub(r"[\r\n\x00-\x1f\x7f]", " ", str(orig_from or "")).strip()
+    realname, sender_addr = parseaddr(clean_orig_from)
+
+    # Sanitize components
+    realname = re.sub(r"\s+", " ", realname).strip()
+    sender_addr = re.sub(r"[^a-zA-Z0-9.!#$%&'*+/=?^_`{|}~@-]", "", sender_addr).strip().lower()
+
+    # Limit sender address per RFC 5321 (max 254)
+    sender_addr = sender_addr[:254]
+
+    # Clean alias address
+    alias_addr = re.sub(r"[\r\n\x00-\x1f\x7f]", "", str(alias_addr or "")).strip().lower()
+
+    # Build hybrid display name
+    if realname and realname.lower() != sender_addr:
+        # Enforce display name limit (max 60 chars) to prevent header line overflow
+        if len(realname) > 60:
+            realname = realname[:57].rstrip() + "..."
+        display_name = f"{realname} ({sender_addr})" if sender_addr else realname
+    elif sender_addr:
+        display_name = sender_addr
+    else:
+        display_name = "Forwarded Mail"
+
+    # Overall display name hard bound (max 150 chars)
+    if len(display_name) > 150:
+        display_name = display_name[:147].rstrip() + "..."
+
+    return formataddr((display_name, alias_addr))
+
+
+def get_pgp_settings_for_candidates(candidates):
+    """Looks up handle or alias PGP configuration in MariaDB for candidate addresses."""
+    try:
+        conn = pymysql.connect(**DB_CONFIG)
+    except Exception as err:
+        sys.stderr.write(f"Database connection error: {err}\n")
+        return None
+
+    try:
+        with conn.cursor() as cursor:
+            for cand in candidates:
+                if not cand:
+                    continue
+                cand = cand.strip().lower()
+                local_part, _, _ = cand.partition("@")
+
+                # 1. Look up alias_handle by handle
+                cursor.execute(
+                    """
+                    SELECT pgp_public_key, pgp_enabled, pgp_hide_subject, handle, address
+                    FROM alias_handle
+                    WHERE (handle = %s OR handle = %s) AND active = 1
+                    LIMIT 1
+                    """,
+                    (local_part, cand)
+                )
+                row = cursor.fetchone()
+                if row:
+                    # Handle found: if PGP is enabled and key exists, return it; otherwise stop and do not encrypt
+                    if row.get("pgp_enabled") and row.get("pgp_public_key"):
+                        return row
+                    return None
+
+                # 2. Look up alias table by address
+                cursor.execute(
+                    """
+                    SELECT pgp_public_key, pgp_enabled, pgp_hide_subject, address, goto
+                    FROM alias
+                    WHERE address = %s AND active = 1
+                    LIMIT 1
+                    """,
+                    (cand,)
+                )
+                row = cursor.fetchone()
+                if row:
+                    # Alias found: if PGP is enabled and key exists, return it; otherwise stop and do not encrypt
+                    if row.get("pgp_enabled") and row.get("pgp_public_key"):
+                        return row
+                    return None
+    except Exception as e:
+        sys.stderr.write(f"Database lookup error: {e}\n")
+        return None
+    finally:
+        conn.close()
+
+    return None
+
+
+def encrypt_message_pgp_mime(raw_email_bytes: bytes, pub_key_armored: str, hide_subject: bool, orig_recipient: str = None) -> bytes:
+    """Encrypts full MIME message into RFC 3156 multipart/encrypted container with hybrid sender rewriting."""
+    msg = email.message_from_bytes(raw_email_bytes, policy=policy.default)
+    key, _ = pgpy.PGPKey.from_blob(pub_key_armored)
+
+    orig_from = str(msg.get("From") or "")
+    orig_reply_to = str(msg.get("Reply-To") or "")
+    orig_to = str(msg.get("To") or "")
+    orig_date = str(msg.get("Date") or "")
+    orig_msg_id = str(msg.get("Message-ID") or "")
+    orig_subject = str(msg.get("Subject") or "")
+
+    # Build the inner encrypted MIME entity preserving all parts and attachments
+    inner_headers = []
+    if orig_from:
+        inner_headers.append(f"From: {orig_from}")
+    if hide_subject and orig_subject:
+        # RFC 7508 Protected Header (Memory Hole)
+        inner_headers.append(f"Subject: {orig_subject}")
+
+    for h in ["Content-Type", "Content-Transfer-Encoding", "Content-Disposition", "MIME-Version"]:
+        if h in msg:
+            inner_headers.append(f"{h}: {msg[h]}")
+
+    _, sep, body_bytes = raw_email_bytes.partition(b"\r\n\r\n")
+    if not sep:
+        _, sep, body_bytes = raw_email_bytes.partition(b"\n\n")
+
+    if inner_headers:
+        inner_content = ("\r\n".join(inner_headers) + "\r\n\r\n").encode("utf-8") + body_bytes
+    else:
+        inner_content = body_bytes
+
+    pgp_msg = pgpy.PGPMessage.new(inner_content)
+    encrypted_blob = str(key.encrypt(pgp_msg))
+
+    # Construct RFC 3156 PGP/MIME container
+    encrypted_container = MIMEMultipart("encrypted", protocol="application/pgp-encrypted")
+
+    # Control part (Part 1: RFC 3156 requirement)
+    control_part = MIMEApplication(
+        "Version: 1\r\n",
+        _subtype="pgp-encrypted",
+        _encoder=email.encoders.encode_noop
+    )
+    control_part.add_header("Content-Description", "PGP/MIME version identification")
+    encrypted_container.attach(control_part)
+
+    # Data part (Part 2: Encrypted ciphertext)
+    data_part = MIMEApplication(
+        encrypted_blob,
+        _subtype="octet-stream",
+        name="encrypted.asc",
+        _encoder=email.encoders.encode_noop
+    )
+    data_part.add_header("Content-Description", "OpenPGP encrypted message")
+    data_part.add_header("Content-Disposition", "inline", filename="encrypted.asc")
+    encrypted_container.attach(data_part)
+
+    # ------------------------------------------------------------------
+    # Hybrid From-Rewriting for DKIM / DMARC Alignment:
+    # "Display Name (user@sender.com)" <alias@domain.tld>
+    # ------------------------------------------------------------------
+    alias_addr = None
+    if orig_recipient and "@" in orig_recipient:
+        alias_addr = orig_recipient.strip().lower()
+    elif orig_to:
+        _, cand_addr = parseaddr(orig_to)
+        if cand_addr and "@" in cand_addr:
+            alias_addr = cand_addr.strip().lower()
+
+    if alias_addr and orig_from:
+        encrypted_container["From"] = build_hybrid_from(orig_from, alias_addr)
+        encrypted_container["Reply-To"] = orig_reply_to if orig_reply_to else orig_from
+    elif orig_from:
+        encrypted_container["From"] = orig_from
+        if orig_reply_to:
+            encrypted_container["Reply-To"] = orig_reply_to
+
+    if orig_to:
+        encrypted_container["To"] = orig_to
+    if orig_date:
+        encrypted_container["Date"] = orig_date
+    if orig_msg_id:
+        encrypted_container["Message-ID"] = orig_msg_id
+
+    # Preserve essential conversation threading and delivery headers
+    for h in ["Cc", "In-Reply-To", "References", "Thread-Topic", "Thread-Index", "List-Unsubscribe", "List-ID"]:
+        if h in msg:
+            encrypted_container[h] = str(msg[h])
+
+    if hide_subject:
+        encrypted_container["Subject"] = "[mail.thc.org: new encrypted email]"
+    else:
+        encrypted_container["Subject"] = orig_subject
+
+    return encrypted_container.as_bytes(policy=policy.default)
+
+
+def parse_cli_args():
+    """Parses command line arguments flexibly for Postfix pipe."""
+    sender = ""
+    orig_recipient = None
+    recipients = []
+
+    args = sys.argv[1:]
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "-f" and i + 1 < len(args):
+            sender = args[i + 1]
+            i += 2
+        elif arg == "-o" and i + 1 < len(args):
+            orig_recipient = args[i + 1]
+            i += 2
+        elif arg.startswith("-"):
+            i += 1
+        else:
+            recipients.append(arg)
+            i += 1
+
+    return sender, orig_recipient, recipients
+
+
+def main():
+    sender, orig_recipient, recipients = parse_cli_args()
+
+    if not sender:
+        sys.stderr.write("Usage: pgp-encryptor-filter -f <sender> [-o <orig_recipient>] <recipient1> ...\n")
+        sys.exit(EX_UNAVAILABLE)
+
+    raw_message = sys.stdin.buffer.read()
+
+    # Collect candidate addresses for PGP lookup in priority order:
+    # 1. Original recipient passed explicitly from Postfix envelope (-o)
+    candidates = []
+    if orig_recipient:
+        candidates.append(orig_recipient)
+    else:
+        # Fallback to recipient headers only if -o was not provided
+        try:
+            parsed_msg = email.message_from_bytes(raw_message, policy=policy.default)
+            header_addrs = getaddresses(parsed_msg.get_all("X-Original-To", []) + parsed_msg.get_all("To", []) + parsed_msg.get_all("Cc", []))
+            for _, addr in header_addrs:
+                if addr and addr not in candidates:
+                    candidates.append(addr)
+        except Exception as e:
+            sys.stderr.write(f"Warning: Failed to parse headers for candidates: {e}\n")
+
+    # If still no candidates found, fallback to recipient arguments
+    if not candidates and recipients:
+        candidates.extend(recipients)
+
+    # Check if any candidate has PGP enabled
+    pgp_settings = get_pgp_settings_for_candidates(candidates)
+    processed_message = raw_message
+
+    if pgp_settings and pgp_settings.get("pgp_enabled"):
+        try:
+            processed_message = encrypt_message_pgp_mime(
+                raw_message,
+                pgp_settings["pgp_public_key"],
+                bool(pgp_settings.get("pgp_hide_subject", 0)),
+                orig_recipient=orig_recipient
+            )
+        except Exception as err:
+            sys.stderr.write(f"PGP Encryption failed: {err}\n")
+            # Fail-closed: tempfail to prevent leaking plaintext
+            sys.exit(EX_TEMPFAIL)
+
+    # Delivery recipients for SMTP reinjection: must be the expanded recipients
+    delivery_recipients = recipients if recipients else candidates[:1]
+
+    # Reinject message back to Postfix via 127.0.0.1:10025
+    try:
+        with smtplib.SMTP(REINJECT_HOST, REINJECT_PORT) as server:
+            server.sendmail(sender, delivery_recipients, processed_message)
+        sys.exit(EX_OK)
+    except Exception as e:
+        sys.stderr.write(f"Failed to reinject email: {e}\n")
+        sys.exit(EX_TEMPFAIL)
+
+
+if __name__ == "__main__":
+    main()

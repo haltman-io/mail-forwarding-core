@@ -122,6 +122,7 @@ mail-forwarding-core/
   opendkim/             # OpenDKIM configuration (KeyTable, SigningTable)
   postfix/              # Postfix configuration (main.cf, master.cf, MySQL maps)
   postsrsd/             # PostSRSd configuration
+  scripts/              # Mail filter and processing scripts (PGP/MIME filter)
 ```
 
 Each directory contains its own `README.md` with detailed documentation.

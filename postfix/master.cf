@@ -2,6 +2,7 @@
 # SMTP listener services
 # -------------------------------------------------
 smtp      inet  n       -       y       -       -       smtpd
+  -o content_filter=pgpfilter:dummy
 submission inet n       -       n       -       -       smtpd
 
 # -------------------------------------------------
@@ -83,3 +84,31 @@ lmtp      unix  -       -       y       -       -       lmtp
 anvil     unix  -       -       y       -       1       anvil
 scache    unix  -       -       y       -       1       scache
 postlog   unix-dgram n  -       n       -       1       postlogd
+
+# -------------------------------------------------
+# PGP Content Filter Pipe Service Definition
+# -------------------------------------------------
+pgpfilter unix  -       n       n       -       -       pipe
+  flags=Rq user=pgpfilter null_sender=
+  argv=/usr/local/bin/pgp-encryptor-filter -f ${sender} -o ${original_recipient} ${recipient}
+
+# -------------------------------------------------
+# Postfix Reinjection Listener (Port 10025)
+# -------------------------------------------------
+# Loop prevention: content_filter is explicitly disabled here.
+127.0.0.1:10025 inet n  -       y       -       -       smtpd
+  -o syslog_name=postfix/reinjection
+  -o content_filter=
+  -o smtpd_restriction_classes=
+  -o smtpd_delay_reject=no
+  -o smtpd_client_restrictions=permit_mynetworks,reject
+  -o smtpd_helo_restrictions=
+  -o smtpd_sender_restrictions=
+  -o smtpd_relay_restrictions=permit_mynetworks,reject
+  -o smtpd_recipient_restrictions=permit_mynetworks,reject
+  -o smtpd_data_restrictions=
+  -o smtpd_end_of_data_restrictions=
+  -o mynetworks=127.0.0.0/8,[::1]/128
+  -o smtpd_error_sleep_time=0
+  -o smtpd_soft_error_limit=1001
+  -o smtpd_hard_error_limit=1000
