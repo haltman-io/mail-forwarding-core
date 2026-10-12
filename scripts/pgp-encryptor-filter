@@ -244,8 +244,13 @@ def encrypt_message_pgp_mime(raw_email_bytes: bytes, pub_key_armored: str, hide_
 
 
 def parse_cli_args():
-    """Parses command line arguments flexibly for Postfix pipe."""
-    sender = ""
+    """Parses command line arguments flexibly for Postfix pipe.
+
+    sender is None only when -f was not passed at all. An empty string is a
+    valid sender: it is the null sender (MAIL FROM:<>), which Postfix expands
+    ${sender} to for bounce/DSN mail because master.cf sets "null_sender=".
+    """
+    sender = None
     orig_recipient = None
     recipients = []
 
@@ -271,7 +276,7 @@ def parse_cli_args():
 def main():
     sender, orig_recipient, recipients = parse_cli_args()
 
-    if not sender:
+    if sender is None:
         sys.stderr.write("Usage: pgp-encryptor-filter -f <sender> [-o <orig_recipient>] <recipient1> ...\n")
         sys.exit(EX_UNAVAILABLE)
 
@@ -320,7 +325,9 @@ def main():
     # Reinject message back to Postfix via 127.0.0.1:10025
     try:
         with smtplib.SMTP(REINJECT_HOST, REINJECT_PORT) as server:
-            server.sendmail(sender, delivery_recipients, processed_message)
+            # An empty envelope sender is passed through as the null sender
+            # (MAIL FROM:<>), so DSN/bounce semantics survive reinjection.
+            server.sendmail(sender or "", delivery_recipients, processed_message)
         sys.exit(EX_OK)
     except Exception as e:
         sys.stderr.write(f"Failed to reinject email: {e}\n")
